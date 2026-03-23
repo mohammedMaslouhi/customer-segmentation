@@ -1,0 +1,243 @@
+<?xml version="1.0" encoding="UTF-8"?><sqlb_project><db path="olist.db" readonly="0" foreign_keys="1" case_sensitive_like="0" temp_store="0" wal_autocheckpoint="1000" synchronous="2"/><attached/><window><main_tabs open="structure browser pragmas query" current="3"/></window><tab_structure><column_width id="0" width="300"/><column_width id="1" width="0"/><column_width id="2" width="100"/><column_width id="3" width="1714"/><column_width id="4" width="0"/><expanded_item id="0" parent="1"/><expanded_item id="1" parent="1"/><expanded_item id="2" parent="1"/><expanded_item id="3" parent="1"/></tab_structure><tab_browse><table title="customers" custom_title="0" dock_id="1" table="4,9:maincustomers"/><dock_state state="000000ff00000000fd00000001000000020000032800000226fc0100000001fb000000160064006f0063006b00420072006f00770073006500310100000000000003280000013100ffffff0000025b0000000000000004000000040000000800000008fc00000000"/><default_encoding codec=""/><browse_table_settings><table schema="main" name="customers" show_row_id="0" encoding="" plot_x_axis="" unlock_view_pk="_rowid_" freeze_columns="0"><sort/><column_widths><column index="1" value="39"/><column index="2" value="257"/><column index="3" value="257"/><column index="4" value="156"/><column index="5" value="202"/><column index="6" value="95"/></column_widths><filter_values/><conditional_formats/><row_id_formats/><display_formats/><hidden_columns/><plot_y_axes/><global_filter/></table></browse_table_settings></tab_browse><tab_sql><sql name="SQL 1">/* 1) Commandes récentes (&lt; 3 mois) avec au moins 3 jours de retard
+
+   (en excluant les commandes annulées) */
+
+
+
+WITH recent_orders AS (
+
+    SELECT
+
+        o.order_id,
+
+        o.customer_id,
+
+        o.order_status,
+
+        o.order_delivered_customer_date,
+
+        o.order_estimated_delivery_date
+
+    FROM orders o
+
+    WHERE o.order_status &lt;&gt; 'canceled'
+
+      AND o.order_delivered_customer_date IS NOT NULL
+
+      AND date(o.order_delivered_customer_date) &gt;= date('2018-10-17','-3 months')
+
+),
+
+late_orders AS (
+
+    SELECT
+
+        order_id,
+
+        customer_id,
+
+        order_delivered_customer_date,
+
+        order_estimated_delivery_date,
+
+        ROUND(
+
+            julianday(order_delivered_customer_date) - julianday(order_estimated_delivery_date)
+
+        ) AS delay_days
+
+    FROM recent_orders
+
+)
+
+SELECT
+
+    order_id,
+
+    customer_id,
+
+    order_delivered_customer_date,
+
+    order_estimated_delivery_date,
+
+    delay_days
+
+FROM late_orders
+
+WHERE delay_days &gt;= 3
+
+ORDER BY delay_days DESC;
+
+
+
+/* 2) Vendeurs avec &gt; 100 000 BRL de chiffre d'affaires sur commandes livrées */
+
+
+
+WITH delivered_items AS (
+
+    SELECT
+
+        oi.seller_id,
+
+        (oi.price + oi.freight_value) AS item_revenue
+
+    FROM order_items oi
+
+    JOIN orders o ON o.order_id = oi.order_id
+
+    WHERE o.order_status = 'delivered'
+
+),
+
+seller_revenue AS (
+
+    SELECT
+
+        seller_id,
+
+        SUM(item_revenue) AS total_revenue
+
+    FROM delivered_items
+
+    GROUP BY seller_id
+
+)
+
+SELECT
+
+    s.seller_id,
+
+    s.seller_city,
+
+    s.seller_state,
+
+    sr.total_revenue
+
+FROM seller_revenue sr
+
+JOIN sellers s ON s.seller_id = sr.seller_id
+
+WHERE sr.total_revenue &gt; 100000
+
+ORDER BY sr.total_revenue DESC;
+
+
+
+/* 3) Nouveaux vendeurs (&lt; 3 mois) ayant déjà vendu &gt; 30 produits
+
+   Date de référence dataset : 2018-10-17 */
+
+
+
+WITH seller_sales AS (
+
+    SELECT
+
+        oi.seller_id,
+
+        MIN(date(o.order_approved_at)) AS first_sale_date,
+
+        COUNT(*) AS nb_products_sold
+
+    FROM order_items oi
+
+    JOIN orders o ON o.order_id = oi.order_id
+
+    WHERE o.order_status = 'delivered'
+
+      AND o.order_approved_at IS NOT NULL
+
+    GROUP BY oi.seller_id
+
+)
+
+SELECT
+
+    s.seller_id,
+
+    s.seller_city,
+
+    s.seller_state,
+
+    ss.first_sale_date,
+
+    ss.nb_products_sold
+
+FROM seller_sales ss
+
+JOIN sellers s ON s.seller_id = ss.seller_id
+
+WHERE ss.first_sale_date &gt;= date('2018-10-17','-3 months')
+
+  AND ss.nb_products_sold &gt; 30
+
+ORDER BY ss.nb_products_sold DESC;
+
+
+
+/* 4) Top 5 codes postaux (&gt; 30 reviews)
+
+      avec le pire score moyen sur les 12 derniers mois
+
+   Date de référence dataset : 2018-10-17 */
+
+
+
+WITH reviews_12m AS (
+
+    SELECT
+
+        r.order_id,
+
+        r.review_score,
+
+        date(r.review_creation_date) AS review_date,
+
+        c.customer_zip_code_prefix
+
+    FROM order_reviews r
+
+    JOIN orders o    ON o.order_id = r.order_id
+
+    JOIN customers c ON c.customer_id = o.customer_id
+
+    WHERE r.review_creation_date IS NOT NULL
+
+      AND date(r.review_creation_date) &gt;= date('2018-10-17','-12 months')
+
+),
+
+zip_stats AS (
+
+    SELECT
+
+        customer_zip_code_prefix,
+
+        COUNT(*) AS nb_reviews,
+
+        ROUND(AVG(review_score), 2) AS avg_review_score
+
+    FROM reviews_12m
+
+    GROUP BY customer_zip_code_prefix
+
+    HAVING COUNT(*) &gt; 30
+
+)
+
+SELECT
+
+    customer_zip_code_prefix,
+
+    nb_reviews,
+
+    avg_review_score
+
+FROM zip_stats
+
+ORDER BY avg_review_score ASC
+
+LIMIT 5;
+
+</sql><current_tab id="0"/></tab_sql></sqlb_project>
